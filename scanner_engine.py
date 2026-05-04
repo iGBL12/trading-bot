@@ -358,76 +358,46 @@ def trend_score(last: pd.Series) -> Tuple[float, List[str]]:
         notes.append("السعر بعيد عن MA50")
     return min(score, 8), notes
 
-
 def smart_money_score(df: pd.DataFrame) -> Tuple[float, List[str]]:
     last = df.iloc[-1]
-    prev = df.iloc[-2]
     score = 0.0
     notes = []
-    rel_vol = last["relative_volume"]
-    if rel_vol >= 2.0:
-        score += 2.5
-        notes.append(f"حجم تداول قوي جداً: {rel_vol:.2f}x")
-    elif rel_vol >= 1.5:
-        score += 2.0
-        notes.append(f"حجم تداول عالي: {rel_vol:.2f}x")
-    elif rel_vol >= 1.2:
-        score += 1.0
-        notes.append(f"حجم تداول جيد: {rel_vol:.2f}x")
-    else:
-        notes.append(f"حجم تداول عادي: {rel_vol:.2f}x")
-    previous_20_high = df.iloc[-21:-1]["high"].max()
-    if last["close"] > previous_20_high and rel_vol >= 1.5:
-        score += 2.0
-        notes.append("اختراق مؤكد مع حجم تداول")
-    elif last["close"] > previous_20_high:
-        score += 1.0
-        notes.append("اختراق لكن الحجم غير كافٍ")
-    else:
-        notes.append("لا يوجد اختراق واضح")
-    daily_range = last["high"] - last["low"]
-    if daily_range > 0:
-        close_position = (last["close"] - last["low"]) / daily_range
-        if close_position >= 0.75:
-            score += 1.5
-            notes.append("إغلاق قوي قرب أعلى اليوم")
-        elif close_position >= 0.55:
-            score += 0.75
-            notes.append("إغلاق إيجابي متوسط")
-        else:
-            notes.append("الإغلاق ضعيف")
-    if last["close"] > prev["close"]:
-        score += 1.0
-        notes.append("أغلق أعلى من اليوم السابق")
-    else:
-        notes.append("أغلق أقل من اليوم السابق")
-    if last["close"] > last["ma20"]:
-        score += 0.75
-    if last["close"] > last["ma50"]:
-        score += 0.75
-        notes.append("فوق متوسطات مهمة")
-    distance_from_ma50 = (last["close"] - last["ma50"]) / last["ma50"]
-    if 0 <= distance_from_ma50 <= 0.08:
-        score += 1.5
-        notes.append("غير ممتد عن MA50")
-    elif distance_from_ma50 > 0.12:
-        score -= 1.0
-        notes.append("ممتد جداً عن MA50")
-    return max(0, min(score, 10)), notes
 
+    distance_from_ma50 = (last["close"] - last["ma50"]) / last["ma50"]
+
+    if distance_from_ma50 <= 0.05:
+        score += 2
+        notes.append("قريب من الدعم (MA50)")
+
+    elif distance_from_ma50 > 0.10:
+        score -= 2
+        notes.append("ممتد وخطر")
+
+    if last["relative_volume"] > 1.5:
+        score += 1.5
+        notes.append("حجم تداول قوي")
+
+    if last["return_5d"] < 0 and last["close"] > last["ma50"]:
+        score += 1.5
+        notes.append("تصحيح داخل ترند صاعد")
+
+    return max(0, min(score, 10)), notes
 
 def detect_setup_type(df: pd.DataFrame) -> str:
     last = df.iloc[-1]
-    previous_20_high = df.iloc[-21:-1]["high"].max()
-    distance_from_ma50 = abs(last["close"] - last["ma50"]) / last["ma50"]
-    if last["close"] > last["ma50"] and distance_from_ma50 <= 0.05:
-        return "تصحيح قرب الدعم"
-    if last["close"] > previous_20_high and last["relative_volume"] >= 1.2:
-        return "اختراق"
-    if last["close"] > last["ma50"] and last["close"] > last["ma200"]:
-        return "استمرار اتجاه"
-    return "لا يوجد نموذج واضح"
 
+    if last["close"] <= last["ma20"] * 1.02 and last["close"] >= last["ma50"] * 0.98:
+        return "Pullback ذكي"
+
+    previous_20_high = df.iloc[-21:-1]["high"].max()
+
+    if last["close"] > previous_20_high:
+        return "اختراق"
+
+    if last["close"] > last["ma50"]:
+        return "استمرار اتجاه"
+
+    return "لا يوجد نموذج واضح"
 
 def calculate_entry_plan(setup_type: str, df: pd.DataFrame) -> Tuple[float, float, float, float, float]:
     last = df.iloc[-1]
@@ -570,78 +540,110 @@ def calculate_position_size(entry: float, stop: float, risk_percent: float) -> T
 
 def build_trade_setup(symbol: str, market: MarketStatus, sentiment: SentimentStatus) -> Optional[TradeSetup]:
     df = fetch_daily_data(symbol)
-    if df is None:
-        print(f"⚠️ {symbol}: لا توجد بيانات")
+    if df is None or len(df) < 220:
         return None
-    if len(df) < 220:
-        print(f"⚠️ {symbol}: البيانات غير كافية ({len(df)} شمعة فقط)")
-        return None
+
     df = add_indicators(df).dropna()
     if len(df) < 10:
-        print(f"⚠️ {symbol}: بيانات المؤشرات غير كافية")
         return None
+
     last = df.iloc[-1]
     current_price = float(last["close"])
     rsi = float(last["rsi"])
+
+    # =========================
+    # 🔴 TIMING FILTER (جديد)
+    # =========================
+    recent_high = df["high"].rolling(20).max().iloc[-1]
+    distance_from_ma50 = (current_price - last["ma50"]) / last["ma50"]
+
+    if current_price > last["ma50"] * 1.10:
+        return None  # ممتد
+
+    if rsi > 75:
+        return None  # تشبع شراء
+
+    if current_price > recent_high * 1.02:
+        return None  # بعد اختراق مبالغ فيه
+
+    # =========================
+    # التحليل الأساسي
+    # =========================
     t_score, t_notes = trend_score(last)
     sm_score, sm_notes = smart_money_score(df)
+
     setup_type = detect_setup_type(df)
+
     early_status, early_score, early_trigger, early_notes = early_watch_signal(df)
+
     market_factor = 2 if market.status == "صاعد" else 1 if market.status == "متذبذب" else 0
     sentiment_factor = 1 if sentiment.status == "شهية مخاطرة" else 0.5 if sentiment.status == "مختلطة" else -1
+
     setup_factor = {
         "تصحيح قرب الدعم": 1.0,
-        "اختراق": 0.75,
-        "استمرار اتجاه": 0.25,
+        "اختراق": 0.5,
+        "استمرار اتجاه": 0.5,
         "لا يوجد نموذج واضح": -1.0,
     }.get(setup_type, -1.0)
-    trade_score_value = (t_score * 0.38) + (sm_score * 0.35) + (market_factor * 0.8) + sentiment_factor + setup_factor
+
+    trade_score_value = (
+        (t_score * 0.35)
+        + (sm_score * 0.30)
+        + (early_score * 0.25)
+        + (market_factor * 0.5)
+        + sentiment_factor
+        + setup_factor
+    )
+
     trade_score_value = max(0, min(trade_score_value, 10))
+
+    # =========================
+    # 🔥 Pullback Entry (جديد)
+    # =========================
+    pullback_zone = (
+        current_price <= last["ma20"] * 1.02 and
+        current_price >= last["ma50"] * 0.98 and
+        rsi < 65
+    )
+
+    if pullback_zone:
+        trade_score_value += 1.5
+        t_notes.append("دخول من Pullback ذكي")
+
+    # =========================
+    # خطة الدخول
+    # =========================
     entry_low, entry_high, stop_loss, target_1, target_2 = calculate_entry_plan(setup_type, df)
-    late_reasons = []
-    if rsi > 75:
-        late_reasons.append("RSI مرتفع جداً")
-        trade_score_value = min(trade_score_value, 5.0)
-    if current_price > target_1:
-        late_reasons.append("السعر تجاوز الهدف الأول")
-        trade_score_value = min(trade_score_value, 5.0)
-    if current_price > entry_high * 1.03:
-        late_reasons.append("السعر بعيد عن منطقة الدخول")
-        trade_score_value = min(trade_score_value, 5.0)
-    risk_level = classify_risk(trade_score_value, rsi, current_price, entry_high, sm_score)
-    if market.status == "هابط" or sentiment.status == "خروج مخاطرة":
-        decision = "تجنب - السوق غير داعم"
-    elif late_reasons:
-        decision = "انتظار - الدخول متأخر"
-    elif setup_type == "لا يوجد نموذج واضح":
-        decision = "مراقبة فقط - لا يوجد نموذج دخول واضح"
-    elif trade_score_value >= MIN_EXCELLENT_SCORE and risk_level in ["منخفضة", "متوسطة"]:
-        decision = "صفقة ممتازة - انتظر دخول السعر في المنطقة"
-    elif trade_score_value >= MIN_GOOD_SCORE:
+
+    # =========================
+    # منع الدخول المتأخر
+    # =========================
+    if current_price > entry_high * 1.02:
+        return None
+
+    # =========================
+    # القرار النهائي
+    # =========================
+    if market.status == "هابط":
+        decision = "تجنب - السوق ضعيف"
+
+    elif early_score >= 7 and trade_score_value >= 7:
+        decision = "صفقة ممتازة - دخول مبكر"
+
+    elif trade_score_value >= 7:
         decision = "صفقة جيدة - تحتاج تأكيد"
-    elif trade_score_value >= 5:
-        decision = "مراقبة فقط"
+
     else:
-        decision = "تجاهل حالياً"
+        decision = "مراقبة فقط"
+
+    risk_level = classify_risk(trade_score_value, rsi, current_price, entry_high, sm_score)
+
     mid_entry = (entry_low + entry_high) / 2
     risk_percent = dynamic_risk_percent(trade_score_value, risk_level)
     shares, risk_amount, risk_per_share = calculate_position_size(mid_entry, stop_loss, risk_percent)
-    notes = t_notes + sm_notes + [
-        f"نوع النموذج: {setup_type}",
-        f"معنويات السوق: {sentiment.status} ({sentiment.score:.1f}/10)",
-        f"الإنذار المبكر: {early_status} ({early_score:.1f}/10)",
-        f"سعر التنبيه المبكر: {money(early_trigger)}",
-    ] + early_notes + late_reasons
-    if shares <= 0:
-        notes.append("حجم الحساب/المخاطرة لا يسمح بكمية آمنة")
-        notes.append(f"نسبة المخاطرة المستخدمة: {risk_percent * 100:.1f}%")
-    arabic_summary = (
-        f"{symbol}: {decision}. نوع الصفقة: {setup_type}. المخاطرة: {risk_level}. "
-        f"الدخول: {money(entry_low)} - {money(entry_high)}، الوقف: {money(stop_loss)}، "
-        f"الأهداف: {money(target_1)} ثم {money(target_2)}. "
-        f"الإنذار المبكر: {early_status} بدرجة {early_score:.1f}/10."
-    )
-    print(f"✅ {symbol}: {decision} | الدرجة {trade_score_value:.1f}/10 | إنذار مبكر {early_score:.1f}/10")
+
+    notes = t_notes + sm_notes + early_notes
+
     return TradeSetup(
         symbol=symbol,
         close=current_price,
@@ -667,10 +669,9 @@ def build_trade_setup(symbol: str, market: MarketStatus, sentiment: SentimentSta
         early_watch=early_status,
         early_watch_score=early_score,
         early_watch_trigger=early_trigger,
-        arabic_summary=arabic_summary,
+        arabic_summary=f"{symbol}: {decision}",
         notes=notes,
     )
-
 
 def print_market(market: MarketStatus):
     print_header("📊 فلتر السوق")

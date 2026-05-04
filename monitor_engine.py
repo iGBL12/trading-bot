@@ -363,7 +363,11 @@ def monitor_trade(trade: Dict) -> Optional[Dict]:
     else:
         rules.append("No important change. Hold the trade.")
 
-    suggested_stop = max(stop, float(last["ma20"]) * 0.98) if pnl_percent > 0 else stop
+    if pnl_percent > 0:
+        suggested_stop = float(last["ma20"]) * 0.99
+
+    else:
+        suggested_stop = stop
 
     return {
         "id": trade.get("id"),
