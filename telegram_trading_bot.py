@@ -1,11 +1,18 @@
 import os, json, random, asyncio
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
-from telegram.ext import Application, CommandHandler
+from telegram import ReplyKeyboardMarkup
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    MessageHandler,
+    filters
+)
 from scanner_engine import build_trade_setup, analyze_market, analyze_sentiment, is_market_open
 from sector_engine import analyze_sector_rotation, format_sector_alert
 from monitor_engine import monitor_trade, should_alert
 from scanner_engine import scan_once
+
 
 load_dotenv()
 
@@ -22,6 +29,14 @@ AUTO_SCAN_SECONDS = 1800  # كل 30 دقيقة
 ALERT_MEMORY_FILE = "sent_alerts.json"
 DEFAULT_WATCHLIST = ["AMD", "NVDA", "MSFT"]
 
+MAIN_KEYBOARD = ReplyKeyboardMarkup(
+    [
+        ["📊 فحص السوق", "👀 إنذار قطاعي"],
+        ["📋 قائمة المراقبة", "📈 صفقاتي"],
+        ["🕒 وقت السوق", "ℹ️ المساعدة"],
+    ],
+    resize_keyboard=True
+)
 
 def load_json(path):
     if not os.path.exists(path):
@@ -39,6 +54,23 @@ def save_json(path, data):
 def alert_key(user_id, symbol, alert_type):
     today = datetime.now().strftime("%Y-%m-%d")
     return f"{today}:{user_id}:{symbol}:{alert_type}"
+
+async def markettime_cmd(update, context):
+    import pytz
+    from datetime import datetime
+
+    ny_tz = pytz.timezone("America/New_York")
+    riyadh_tz = pytz.timezone("Asia/Riyadh")
+
+    now_ny = datetime.now(ny_tz)
+    now_riyadh = datetime.now(riyadh_tz)
+
+    await update.message.reply_text(
+        f"🕒 توقيت الرياض: {now_riyadh.strftime('%Y-%m-%d %H:%M:%S')}\n"
+        f"🕒 توقيت نيويورك: {now_ny.strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+        f"حالة السوق حسب البوت: {'✅ مفتوح' if is_market_open() else '❌ مغلق'}"
+    )
+
 
 async def auto_scanner(context):
     app = context.application
@@ -224,6 +256,8 @@ async def help_cmd(update, context):
         "/removesymbol AMD\n\n"
         "الفحص:\n"
         "/scan\n\n"
+        "/sector AMD\n"
+        "/markettime\n\n"
         "الصفقات: /addtrade SYMBOL ENTRY STOP TARGET SHARES \n"
         "/addtrade AMD 325 310 350 1\n"
         "/trades\n"
@@ -241,11 +275,9 @@ async def myid(update, context):
 
 async def start(update, context):
     await update.message.reply_text(
-        "أهلاً بك في بوت التداول.\n"
-        "استخدم /help لعرض الأوامر.\n"
-        "للدخول استخدم:\n/login CODE"
+        "أهلاً بك في بوت التداول الذكي 🚀",
+        reply_markup=MAIN_KEYBOARD
     )
-
 
 async def create_code(update, context):
     if not is_admin(update.effective_user.id):
@@ -529,6 +561,31 @@ def format_alert(report):
         f"الأخبار:\n{news_summary}"
     )
 
+async def sector_cmd(update, context):
+    user_id = update.effective_user.id
+
+    if not is_user_active(user_id):
+        await update.message.reply_text("❌ اشتراكك غير فعال.")
+        return
+
+    try:
+        symbol = context.args[0].upper()
+    except:
+        await update.message.reply_text("الاستخدام:\n/sector AMD")
+        return
+
+    signal = await asyncio.to_thread(
+        analyze_sector_rotation,
+        symbol
+    )
+
+    if not signal:
+        await update.message.reply_text("لا توجد بيانات كافية.")
+        return
+
+    await update.message.reply_text(
+        format_sector_alert(signal)
+    )
 
 async def monitor_cmd(update, context):
     user_id = update.effective_user.id
@@ -641,6 +698,27 @@ async def users_cmd(update, context):
 
     await update.message.reply_text(msg)
 
+async def menu_handler(update, context):
+    text = update.message.text
+
+    if text == "📊 فحص السوق":
+        await scan_cmd(update, context)
+
+    elif text == "👀 إنذار قطاعي":
+        context.args = ["AMD"]
+        await sector_cmd(update, context)
+
+    elif text == "📋 قائمة المراقبة":
+        await watchlist_cmd(update, context)
+
+    elif text == "📈 صفقاتي":
+        await trades_cmd(update, context)
+
+    elif text == "🕒 وقت السوق":
+        await markettime_cmd(update, context)
+
+    elif text == "ℹ️ المساعدة":
+        await help_cmd(update, context)
 
 def main():
     if not TOKEN:
@@ -661,6 +739,8 @@ def main():
     app.add_handler(CommandHandler("login", login))
     app.add_handler(CommandHandler("status", status))
     app.add_handler(CommandHandler("users", users_cmd))
+    app.add_handler(CommandHandler("markettime", markettime_cmd))
+    app.add_handler(CommandHandler("sector", sector_cmd))
 
     app.add_handler(CommandHandler("watchlist", watchlist_cmd))
     app.add_handler(CommandHandler("addsymbol", addsymbol_cmd))
@@ -673,6 +753,9 @@ def main():
     app.add_handler(CommandHandler("monitor", monitor_cmd))
 
     print("Telegram trading bot started...")
+    app.add_handler(
+    MessageHandler(filters.TEXT & ~filters.COMMAND, menu_handler)
+    )
     app.run_polling()
 
 
