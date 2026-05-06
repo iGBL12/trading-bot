@@ -1,6 +1,7 @@
 import os, json, random, asyncio
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
+from capital_flow_engine import analyze_capital_flow, format_capital_flow_report
 from telegram import ReplyKeyboardMarkup
 from telegram.ext import (
     Application,
@@ -263,6 +264,7 @@ async def help_cmd(update, context):
         "/trades\n"
         "/closetrade 1\n"
         "/monitor\n\n"
+        "/flow\n"
         "أوامر الأدمن:\n"
         "/create_code Abdul 30\n"
         "/users"
@@ -720,6 +722,21 @@ async def menu_handler(update, context):
     elif text == "ℹ️ المساعدة":
         await help_cmd(update, context)
 
+async def flow_cmd(update, context):
+    user_id = update.effective_user.id
+
+    if not is_user_active(user_id):
+        await update.message.reply_text("❌ اشتراكك غير فعال.")
+        return
+
+    await update.message.reply_text("💰 جاري تحليل توجه رؤوس الأموال...")
+
+    try:
+        signals = await asyncio.to_thread(analyze_capital_flow)
+        await update.message.reply_text(format_capital_flow_report(signals))
+    except Exception as e:
+        await update.message.reply_text(f"❌ خطأ في تحليل السيولة:\n{e}")
+
 def main():
     if not TOKEN:
         raise RuntimeError("TELEGRAM_BOT_TOKEN is missing in .env")
@@ -741,6 +758,7 @@ def main():
     app.add_handler(CommandHandler("users", users_cmd))
     app.add_handler(CommandHandler("markettime", markettime_cmd))
     app.add_handler(CommandHandler("sector", sector_cmd))
+    app.add_handler(CommandHandler("flow", flow_cmd))
 
     app.add_handler(CommandHandler("watchlist", watchlist_cmd))
     app.add_handler(CommandHandler("addsymbol", addsymbol_cmd))
