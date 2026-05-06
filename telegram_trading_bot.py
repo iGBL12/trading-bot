@@ -3,7 +3,7 @@ from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from telegram.ext import Application, CommandHandler
 from scanner_engine import build_trade_setup, analyze_market, analyze_sentiment, is_market_open
-
+from sector_engine import analyze_sector_rotation, format_sector_alert
 from monitor_engine import monitor_trade, should_alert
 from scanner_engine import scan_once
 
@@ -55,7 +55,6 @@ async def auto_scanner(context):
             print("Auto scanner: no active users")
             return
 
-        # تشغيل الفحص الثقيل خارج event loop
         market = await asyncio.to_thread(analyze_market)
         sentiment = await asyncio.to_thread(analyze_sentiment)
 
@@ -71,9 +70,31 @@ async def auto_scanner(context):
                     sentiment
                 )
 
+                # =========================
+                # إذا لم توجد صفقة عادية
+                # افحص هل هناك دوران سيولة قطاعي
+                # =========================
                 if not setup:
+                    sector_signal = await asyncio.to_thread(
+                        analyze_sector_rotation,
+                        symbol
+                    )
+
+                    if sector_signal and sector_signal.score >= 7.5:
+                        key = alert_key(user_id, symbol, "SECTOR_ROTATION")
+
+                        if not was_alert_sent(key):
+                            await app.bot.send_message(
+                                chat_id=user_id,
+                                text=format_sector_alert(sector_signal)
+                            )
+                            mark_alert_sent(key)
+
                     continue
 
+                # =========================
+                # فرصة ممتازة
+                # =========================
                 if "صفقة ممتازة" in setup.decision:
                     key = alert_key(user_id, setup.symbol, "BEST_SETUP")
 
@@ -93,6 +114,9 @@ async def auto_scanner(context):
                         )
                         mark_alert_sent(key)
 
+                # =========================
+                # إنذار مبكر
+                # =========================
                 elif setup.early_watch_score >= 7.5:
                     key = alert_key(user_id, setup.symbol, "EARLY_WATCH")
 
@@ -109,10 +133,31 @@ async def auto_scanner(context):
                         )
                         mark_alert_sent(key)
 
+                # =========================
+                # تنبيه قطاعي حتى لو فيه setup
+                # لكن لم يصل لفرصة ممتازة
+                # =========================
+                else:
+                    sector_signal = await asyncio.to_thread(
+                        analyze_sector_rotation,
+                        symbol
+                    )
+
+                    if sector_signal and sector_signal.score >= 8.0:
+                        key = alert_key(user_id, symbol, "SECTOR_ROTATION")
+
+                        if not was_alert_sent(key):
+                            await app.bot.send_message(
+                                chat_id=user_id,
+                                text=format_sector_alert(sector_signal)
+                            )
+                            mark_alert_sent(key)
+
         print("Auto scanner completed")
 
     except Exception as e:
         print(f"Auto scanner error: {e}")
+
 def was_alert_sent(key):
     alerts = load_json(ALERT_MEMORY_FILE)
     return key in alerts
