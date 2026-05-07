@@ -9,6 +9,13 @@ from telegram.ext import (
     MessageHandler,
     filters
 )
+from paper_engine import (
+    paper_auto_buy,
+    paper_summary,
+    set_paper_enabled,
+    close_paper_trade,
+    get_open_trades
+)
 from scanner_engine import build_trade_setup, analyze_market, analyze_sentiment, is_market_open
 from sector_engine import analyze_sector_rotation, format_sector_alert
 from monitor_engine import monitor_trade, should_alert
@@ -72,7 +79,6 @@ async def markettime_cmd(update, context):
         f"حالة السوق حسب البوت: {'✅ مفتوح' if is_market_open() else '❌ مغلق'}"
     )
 
-
 async def auto_scanner(context):
     app = context.application
 
@@ -93,6 +99,58 @@ async def auto_scanner(context):
 
         for user in active_users:
             user_id = user["telegram_id"]
+
+            # ==================================================
+            # 1) مراقبة الصفقات الافتراضية المفتوحة
+            # ==================================================
+            open_paper_trades = get_open_trades(user_id)
+
+            for trade in open_paper_trades:
+                report = await asyncio.to_thread(monitor_trade, trade)
+
+                if not report:
+                    continue
+
+                if report["action"] == "EXIT_NOW":
+                    msg = close_paper_trade(
+                        user_id=user_id,
+                        trade_id=trade["id"],
+                        exit_price=report["current"],
+                        reason="وقف خسارة / خروج إجباري"
+                    )
+
+                    if msg:
+                        await send_trade_notification(app, user_id, msg)
+
+                elif report["action"] == "TAKE_PROFIT":
+                    msg = close_paper_trade(
+                        user_id=user_id,
+                        trade_id=trade["id"],
+                        exit_price=report["current"],
+                        reason="تحقق الهدف"
+                    )
+
+                    if msg:
+                        await send_trade_notification(app, user_id, msg)
+
+                elif report["action"] in ["RAISE_STOP", "PARTIAL_PROFIT", "WARNING"]:
+                    key = alert_key(
+                        user_id,
+                        trade["symbol"],
+                        f"PAPER_{report['action']}"
+                    )
+
+                    if not was_alert_sent(key):
+                        await send_trade_notification(
+                            app,
+                            user_id,
+                            format_alert(report)
+                        )
+                        mark_alert_sent(key)
+
+            # ==================================================
+            # 2) فحص قائمة المراقبة للبحث عن فرص جديدة
+            # ==================================================
             symbols = get_user_watchlist(user_id)
 
             for symbol in symbols:
@@ -103,10 +161,9 @@ async def auto_scanner(context):
                     sentiment
                 )
 
-                # =========================
-                # إذا لم توجد صفقة عادية
-                # افحص هل هناك دوران سيولة قطاعي
-                # =========================
+                # ==================================================
+                # إذا لم توجد صفقة عادية، افحص السيولة القطاعية
+                # ==================================================
                 if not setup:
                     sector_signal = await asyncio.to_thread(
                         analyze_sector_rotation,
@@ -125,9 +182,9 @@ async def auto_scanner(context):
 
                     continue
 
-                # =========================
-                # فرصة ممتازة
-                # =========================
+                # ==================================================
+                # 3) فرصة ممتازة + شراء افتراضي تلقائي
+                # ==================================================
                 if "صفقة ممتازة" in setup.decision:
                     key = alert_key(user_id, setup.symbol, "BEST_SETUP")
 
@@ -147,9 +204,15 @@ async def auto_scanner(context):
                         )
                         mark_alert_sent(key)
 
-                # =========================
-                # إنذار مبكر
-                # =========================
+                    # شراء افتراضي تلقائي
+                    paper_msg = paper_auto_buy(user_id, setup)
+
+                    if paper_msg:
+                        await send_trade_notification(app, user_id, paper_msg)
+
+                # ==================================================
+                # 4) إنذار مبكر
+                # ==================================================
                 elif setup.early_watch_score >= 7.5:
                     key = alert_key(user_id, setup.symbol, "EARLY_WATCH")
 
@@ -166,10 +229,9 @@ async def auto_scanner(context):
                         )
                         mark_alert_sent(key)
 
-                # =========================
-                # تنبيه قطاعي حتى لو فيه setup
-                # لكن لم يصل لفرصة ممتازة
-                # =========================
+                # ==================================================
+                # 5) تنبيه قطاعي
+                # ==================================================
                 else:
                     sector_signal = await asyncio.to_thread(
                         analyze_sector_rotation,
@@ -204,6 +266,36 @@ def mark_alert_sent(key):
 def is_admin(user_id):
     return user_id in ADMIN_IDS
 
+async def paper_cmd(update, context):
+    user_id = update.effective_user.id
+
+    if not is_user_active(user_id):
+        await update.message.reply_text("❌ اشتراكك غير فعال.")
+        return
+
+    await update.message.reply_text(paper_summary(user_id))
+
+
+async def paper_on_cmd(update, context):
+    user_id = update.effective_user.id
+
+    if not is_user_active(user_id):
+        await update.message.reply_text("❌ اشتراكك غير فعال.")
+        return
+
+    set_paper_enabled(user_id, True)
+    await update.message.reply_text("✅ تم تفعيل التداول الافتراضي التلقائي.")
+
+
+async def paper_off_cmd(update, context):
+    user_id = update.effective_user.id
+
+    if not is_user_active(user_id):
+        await update.message.reply_text("❌ اشتراكك غير فعال.")
+        return
+
+    set_paper_enabled(user_id, False)
+    await update.message.reply_text("⏸️ تم إيقاف التداول الافتراضي التلقائي.")
 
 def is_user_active(user_id):
     users = load_json(USERS_FILE)
@@ -619,6 +711,25 @@ async def monitor_cmd(update, context):
                 f"الحالة: HOLD"
             )
 
+async def send_trade_notification(app, user_id, message):
+    # إرسال للمستخدم
+    try:
+        await app.bot.send_message(
+            chat_id=user_id,
+            text=message
+        )
+    except Exception as e:
+        print(f"Failed to notify user {user_id}: {e}")
+
+    # إرسال للأدمن
+    for admin_id in ADMIN_IDS:
+        try:
+            await app.bot.send_message(
+                chat_id=admin_id,
+                text=f"📡 إشعار من محفظة المستخدم {user_id}\n\n{message}"
+            )
+        except Exception as e:
+            print(f"Failed to notify admin {admin_id}: {e}")
 
 async def scan_cmd(update, context):
     user_id = update.effective_user.id
@@ -762,6 +873,9 @@ def main():
 
     app.add_handler(CommandHandler("watchlist", watchlist_cmd))
     app.add_handler(CommandHandler("addsymbol", addsymbol_cmd))
+    app.add_handler(CommandHandler("paper", paper_cmd))
+    app.add_handler(CommandHandler("paper_on", paper_on_cmd))
+    app.add_handler(CommandHandler("paper_off", paper_off_cmd))
     app.add_handler(CommandHandler("removesymbol", removesymbol_cmd))
 
     app.add_handler(CommandHandler("scan", scan_cmd))
